@@ -1,0 +1,6 @@
+framework module OnnxVad {
+  umbrella header "OnnxVad-umbrella.h"
+
+  export *
+  module * { export * }
+}

@@ -1,0 +1,29 @@
+PODS:
+  - onnxruntime-c (1.22.0)
+  - onnxruntime-objc (1.22.0):
+    - onnxruntime-objc/Core (= 1.22.0)
+  - onnxruntime-objc/Core (1.22.0):
+    - onnxruntime-c (= 1.22.0)
+  - OnnxVad (0.1.0):
+    - onnxruntime-objc
+
+DEPENDENCIES:
+  - OnnxVad (from `../`)
+
+SPEC REPOS:
+  trunk:
+    - onnxruntime-c
+    - onnxruntime-objc
+
+EXTERNAL SOURCES:
+  OnnxVad:
+    :path: "../"
+
+SPEC CHECKSUMS:
+  onnxruntime-c: 7f778680e96145956c0a31945f260321eed2611a
+  onnxruntime-objc: 83d28b87525bd971259a66e153ea32b5d023de19
+  OnnxVad: 3101985e7f8b94969e310990245ef0aa0ab1d9d2
+
+PODFILE CHECKSUM: 81e28b86f8921e9d4a30e0c9e28138c176a3081f
+
+COCOAPODS: 1.16.2
