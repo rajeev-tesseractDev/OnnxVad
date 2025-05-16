@@ -1,0 +1,31 @@
+{
+  "name": "OnnxVad",
+  "version": "0.1.0",
+  "summary": "A short description of OnnxVad.",
+  "description": "TODO: Add long description of the pod here.",
+  "homepage": "https://github.com/rajeev-tesseractDev/OnnxVad",
+  "license": {
+    "type": "MIT",
+    "file": "LICENSE"
+  },
+  "authors": {
+    "rajeev-tesseractDev": "rajeev.kulariya@tesseract.in"
+  },
+  "source": {
+    "git": "https://github.com/rajeev-tesseractDev/OnnxVad.git",
+    "tag": "0.1.0"
+  },
+  "platforms": {
+    "ios": "16.0"
+  },
+  "source_files": "OnnxVad/Classes/**/*",
+  "static_framework": true,
+  "resource_bundles": {
+    "OnnxVad": [
+      "OnnxVad/Assets/**/*.{onnx}"
+    ]
+  },
+  "dependencies": {
+    "onnxruntime-objc": []
+  }
+}

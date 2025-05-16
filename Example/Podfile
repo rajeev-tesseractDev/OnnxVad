@@ -1,0 +1,13 @@
+use_frameworks!
+
+platform :ios, '16.0'
+
+target 'OnnxVad_Example' do
+  pod 'OnnxVad', :path => '../'
+
+  target 'OnnxVad_Tests' do
+    inherit! :search_paths
+
+    
+  end
+end

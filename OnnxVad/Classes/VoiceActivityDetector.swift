@@ -1,0 +1,321 @@
+//
+//  VoiceActivityDetector.swift
+//  Silero-VAD-for-iOS
+//
+//  Created by rajeev-tesseractDev on 05/16/2025.
+//  Copyright (c) 2025 rajeev-tesseractDev. All rights reserved.
+//
+
+import Foundation
+import AVFAudio
+import onnxruntime_objc
+
+enum DetectMode {
+    case Chunk
+    case Stream(windowSampleNums: Int)
+}
+
+public struct VADResult {
+    public var score: Float, start: Int, end: Int
+}
+
+public struct VADTimeResult {
+    public var start: Int = 0
+    public var end: Int = 0
+}
+
+extension Data {
+    func floatArray() -> [Float] {
+        var floatArray = [Float](repeating: 0, count: self.count/MemoryLayout<Float>.stride)
+        _ = floatArray.withUnsafeMutableBytes {
+            self.copyBytes(to: $0, from: 0..<count)
+        }
+        return floatArray
+    }
+    
+    enum Endianess {
+        case little
+        case big
+    }
+    
+    func toFloat(endianess: Endianess = .little) -> Float? {
+        guard self.count <= 4 else { return nil }
+        switch endianess {
+        case .big:
+            let data = [UInt8](repeating: 0x00, count: 4-self.count) + self
+            return data.withUnsafeBytes { $0.load(as: Float.self) }
+        case .little:
+            let data = self + [UInt8](repeating: 0x00, count: 4-self.count)
+            return data.reversed().withUnsafeBytes { $0.load(as: Float.self) }
+        }
+    }
+}
+
+public final class VoiceActivityDetector {
+    private var _modelHandler: ModelHandler?
+    private let expectedFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)
+    private var _detectMode: DetectMode = .Chunk
+    
+    public init() {
+        loadModel()
+    }
+    
+    private func loadModel() {
+        guard _modelHandler == nil else {
+            return
+        }
+        
+        _modelHandler = ModelHandler(modelFilename: "silero_vad_cache", modelExtension: "onnx", threadCount: 4)
+    }
+    
+    private func _checkAudioFormat(pcmFormat: AVAudioFormat) -> Bool {
+        // Check whether the sample rate matches
+        guard pcmFormat.sampleRate == expectedFormat!.sampleRate else {
+            return false
+        }
+        
+        // Check whether the number of channels matches
+        guard pcmFormat.channelCount == expectedFormat!.channelCount else {
+            return false
+        }
+        
+        // Check if the bit depths match
+        guard pcmFormat.commonFormat == expectedFormat!.commonFormat else {
+            return false
+        }
+        
+        return true
+    }
+    
+    func divideIntoSegments(_ x: Int, step: Int) -> [(start: Int, count: Int)] {
+        var result: [(start: Int, count: Int)] = []
+        var remaining = x
+        var start = 0
+        
+        while remaining > 0 {
+            let count = min(step, remaining)
+            result.append((start, count))
+            remaining -= count
+            start += count
+        }
+        
+        return result
+    }
+    
+    fileprivate func _detectVAD(_ buffer: AVAudioPCMBuffer, _ windowSampleNums: Int, _ modelHandler: ModelHandler ) -> [VADResult]  {
+        var scores: [VADResult] = []
+        let channelData: UnsafePointer<UnsafeMutablePointer<Float32>> = buffer.floatChannelData!
+        let channelPointer: UnsafeMutablePointer<Float32> = channelData[0]
+        let frameLength = Int(buffer.frameLength)
+        
+        let segments = divideIntoSegments(frameLength, step: windowSampleNums)
+        
+        var tempCount = 0
+        segments.forEach { (start: Int, count: Int) in
+            let pointer: UnsafeMutablePointer<Float32> = channelPointer.advanced(by: start)
+            
+            let byteSize = count * MemoryLayout<Float32>.stride
+            var data = Data(bytes: pointer, count: byteSize)
+            tempCount += count
+            if count < windowSampleNums {
+                data.append(Data(repeating: 0, count: windowSampleNums - count))
+            }
+            
+            let score = modelHandler.prediction(x: data, sr: 16000)
+            scores.append(VADResult(score: score, start: start, end: tempCount-1))
+        }
+        
+        return scores
+    }
+}
+
+public extension VoiceActivityDetector {
+    func resetState() {
+        guard let modelHandler = _modelHandler else {
+            return
+        }
+        _detectMode = .Chunk
+        modelHandler.resetState()
+    }
+    
+    func detect(buffer: AVAudioPCMBuffer, windowSampleNums: Int = 512) -> [VADResult]? {
+        guard let modelHandler = _modelHandler else {
+            return nil
+        }
+        guard _checkAudioFormat(pcmFormat: buffer.format) else {
+            return nil
+        }
+        resetState()
+        return _detectVAD(buffer, windowSampleNums, modelHandler)
+    }
+    
+    func detectContinuously(buffer: AVAudioPCMBuffer, windowSampleNums: Int = 512) -> [VADResult]? {
+        guard let modelHandler = _modelHandler else {
+            return nil
+        }
+        guard _checkAudioFormat(pcmFormat: buffer.format) else {
+            return nil
+        }
+        
+        switch _detectMode {
+        case .Stream(windowSampleNums: windowSampleNums):
+            break
+        default:
+            _detectMode = .Stream(windowSampleNums: windowSampleNums)
+            modelHandler.resetState()
+            break
+        }
+        
+        return _detectVAD(buffer, windowSampleNums, modelHandler)
+    }
+    
+    /**
+     Parameters
+     ----------
+     threshold: float (default - 0.5)
+     Speech threshold. Silero VAD outputs speech probabilities for each audio chunk, probabilities ABOVE this value are considered as SPEECH.
+     It is better to tune this parameter for each dataset separately, but "lazy" 0.5 is pretty good for most datasets.
+     Voice thresholds.Silero VAD Output a speech probability for each audio block, with probabilities above this value considered speech.
+     It's best to adjust this parameter for each dataset, but for most datasets, 0.5 is a good choice.
+     
+     minSpeechDurationInMS: int (default - 250 milliseconds)
+     Final speech chunks shorter minSpeechDurationInMS are thrown out
+     If the duration of the segmented voice block is less than the minimum voice duration, it is discarded.
+     
+     maxSpeechDurationInS: int (default -  inf)
+     Maximum duration of speech chunks in seconds
+     Chunks longer than maxSpeechDurationInS will be split at the timestamp of the last silence that lasts more than 100s (if any), to prevent agressive cutting.
+     Otherwise, they will be split aggressively just before maxSpeechDurationInS.
+     The maximum duration of the voice block, the block beyond this time will be split at the last silent timestamp that exceeds 100 seconds to prevent too vigorous cutting. Otherwise, they will be aggressively split before the maximum voice duration.
+     
+     minSilenceDurationInMS: int (default - 100 milliseconds)
+     In the end of each speech chunk wait for minSilenceDurationInMS before separating it
+     At the end of each speech block, wait for the minimum silence time for splitting.
+     
+     speechPadInMS: int (default - 30 milliseconds)
+     Final speech chunks are padded by speechPadInMS each side
+     The final speech block is populated with the voice fill time on each side.
+     */
+    func detectForTimeStemp(buffer: AVAudioPCMBuffer,
+                            threshold: Float = 0.5,
+                            minSpeechDurationInMS: Int = 250,
+                            maxSpeechDurationInS: Float = 30,
+                            minSilenceDurationInMS: Int = 100,
+                            speechPadInMS: Int = 30,
+                            windowSampleNums: Int = 512) -> [VADTimeResult]? {
+        
+        let sr = buffer.format.sampleRate
+        
+        guard let vadResults = detect(buffer: buffer, windowSampleNums: windowSampleNums) else {
+            return nil
+        }
+        
+        let minSpeechSamples = Int(sr * Double(minSpeechDurationInMS) * 0.001)
+        let maxSpeechSamples = Int(sr * Double(maxSpeechDurationInS))
+        let minSilenceSample = Int(sr * Double(minSilenceDurationInMS) * 0.001)
+        let minSilenceSampleAtMaxSpeech = Int(sr * Double(0.098))
+        let speechPadSamples = Int(sr *  Double(speechPadInMS) * 0.001)
+        
+        var triggered = false
+        var speeches = [VADTimeResult]()
+        var currentSpeech = VADTimeResult()
+        
+        let neg_threshold = threshold - 0.15
+        var temp_end = 0
+        var prev_end = 0
+        var next_start = 0
+        
+        for (i, speech) in vadResults.enumerated() {
+            let speech_prob = speech.score
+            if speech_prob >= threshold && temp_end != 0 {
+                temp_end = 0
+                if next_start < prev_end {
+                    next_start = windowSampleNums * i
+                }
+            }
+            
+            
+            if speech_prob >= threshold && !triggered {
+                triggered = true
+                currentSpeech.start = windowSampleNums * i
+                continue
+            }
+            
+            if triggered && (windowSampleNums * i) - currentSpeech.start > maxSpeechSamples {
+                if prev_end != 0 {
+                    currentSpeech.end = prev_end
+                    speeches.append(currentSpeech)
+                    currentSpeech = VADTimeResult()
+                    if next_start < prev_end {
+                        triggered = false
+                    } else {
+                        currentSpeech.start = next_start
+                    }
+                    prev_end = 0
+                    next_start = 0
+                    temp_end = 0
+                } else {
+                    currentSpeech.end = windowSampleNums * i
+                    speeches.append(currentSpeech)
+                    currentSpeech = VADTimeResult()
+                    prev_end = 0
+                    next_start = 0
+                    temp_end = 0
+                    triggered = false
+                    continue
+                }
+            }
+            
+            if speech_prob < neg_threshold && triggered {
+                if temp_end == 0 {
+                    temp_end = windowSampleNums * i
+                }
+                if (windowSampleNums * i) - temp_end > minSilenceSampleAtMaxSpeech {
+                    prev_end = temp_end
+                }
+                if (windowSampleNums * i) - temp_end < minSilenceSample {
+                    continue
+                } else {
+                    currentSpeech.end = temp_end
+                    if (currentSpeech.end - currentSpeech.start) > minSpeechSamples {
+                        speeches.append(currentSpeech)
+                    }
+                    currentSpeech = VADTimeResult()
+                    prev_end = 0
+                    next_start = 0
+                    temp_end = 0
+                    triggered = false
+                    continue
+                }
+            }
+        }
+        
+        let audio_length_samples = Int(buffer.frameLength)
+        if currentSpeech.start > 0 && (audio_length_samples - currentSpeech.start) > minSpeechSamples {
+            currentSpeech.end = audio_length_samples
+            speeches.append(currentSpeech)
+        }
+        
+        
+        for i in 0..<speeches.count {
+            if i == 0 {
+                speeches[i].start = Int(max(0, speeches[i].start - speechPadSamples))
+            }
+            
+            if i != speeches.count - 1 {
+                let silence_duration = speeches[i+1].start - speeches[i].end
+                if silence_duration < 2 * speechPadSamples {
+                    speeches[i].end += Int(silence_duration / 2)
+                    speeches[i+1].start = Int(max(0, speeches[i+1].start - silence_duration / 2))
+                } else {
+                    speeches[i].end = Int(min(audio_length_samples, speeches[i].end + speechPadSamples))
+                    speeches[i+1].start = Int(max(0, speeches[i+1].start - speechPadSamples))
+                }
+            } else {
+                speeches[i].end = Int(min(audio_length_samples, speeches[i].end + speechPadSamples))
+            }
+        }
+        
+        return speeches
+    }
+}
