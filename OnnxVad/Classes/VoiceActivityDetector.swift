@@ -10,21 +10,34 @@ import Foundation
 import AVFAudio
 import onnxruntime_objc
 
+/// Enum representing different voice activity detection modes
 enum DetectMode {
+    /// Process audio in complete chunks
     case Chunk
+    /// Process audio in continuous streams with specified window size
     case Stream(windowSampleNums: Int)
 }
 
+/// Structure representing voice activity detection results
 public struct VADResult {
-    public var score: Float, start: Int, end: Int
+    /// Confidence score of voice activity (0 to 1)
+    public var score: Float
+    /// Start sample index of the detected segment
+    public var start: Int
+    /// End sample index of the detected segment
+    public var end: Int
 }
 
+/// Structure representing voice activity time segments
 public struct VADTimeResult {
+    /// Start time of voice activity (in samples)
     public var start: Int = 0
+    /// End time of voice activity (in samples)
     public var end: Int = 0
 }
 
 extension Data {
+    /// Converts Data to an array of Float values
     func floatArray() -> [Float] {
         var floatArray = [Float](repeating: 0, count: self.count/MemoryLayout<Float>.stride)
         _ = floatArray.withUnsafeMutableBytes {
@@ -33,11 +46,13 @@ extension Data {
         return floatArray
     }
     
+    /// Enum representing byte ordering
     enum Endianess {
         case little
         case big
     }
     
+    /// Converts Data to a Float value with specified byte ordering
     func toFloat(endianess: Endianess = .little) -> Float? {
         guard self.count <= 4 else { return nil }
         switch endianess {
@@ -51,15 +66,18 @@ extension Data {
     }
 }
 
+/// A voice activity detector using Silero VAD model
 public final class VoiceActivityDetector {
     private var _modelHandler: ModelHandler?
     private let expectedFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)
     private var _detectMode: DetectMode = .Chunk
     
+    /// Initializes a new voice activity detector
     public init() {
         loadModel()
     }
     
+    /// Loads the Silero VAD ONNX model
     private func loadModel() {
         guard _modelHandler == nil else {
             return
@@ -68,6 +86,7 @@ public final class VoiceActivityDetector {
         _modelHandler = ModelHandler(modelFilename: "silero_vad_cache", modelExtension: "onnx", threadCount: 4)
     }
     
+    /// Verifies if the audio format matches the expected format
     private func _checkAudioFormat(pcmFormat: AVAudioFormat) -> Bool {
         // Check whether the sample rate matches
         guard pcmFormat.sampleRate == expectedFormat!.sampleRate else {
@@ -87,6 +106,7 @@ public final class VoiceActivityDetector {
         return true
     }
     
+    /// Divides a large sample count into smaller segments
     func divideIntoSegments(_ x: Int, step: Int) -> [(start: Int, count: Int)] {
         var result: [(start: Int, count: Int)] = []
         var remaining = x
@@ -102,6 +122,7 @@ public final class VoiceActivityDetector {
         return result
     }
     
+    /// Performs voice activity detection on the audio buffer
     fileprivate func _detectVAD(_ buffer: AVAudioPCMBuffer, _ windowSampleNums: Int, _ modelHandler: ModelHandler ) -> [VADResult]  {
         var scores: [VADResult] = []
         let channelData: UnsafePointer<UnsafeMutablePointer<Float32>> = buffer.floatChannelData!
@@ -130,6 +151,7 @@ public final class VoiceActivityDetector {
 }
 
 public extension VoiceActivityDetector {
+    /// Resets the internal state of the VAD model
     func resetState() {
         guard let modelHandler = _modelHandler else {
             return
@@ -138,6 +160,11 @@ public extension VoiceActivityDetector {
         modelHandler.resetState()
     }
     
+    /// Detects voice activity in an audio buffer (chunk mode)
+    /// - Parameters:
+    ///   - buffer: The audio buffer to analyze
+    ///   - windowSampleNums: Number of samples per analysis window (default: 512)
+    /// - Returns: Array of VAD results or nil if detection fails
     func detect(buffer: AVAudioPCMBuffer, windowSampleNums: Int = 512) -> [VADResult]? {
         guard let modelHandler = _modelHandler else {
             return nil
@@ -149,6 +176,11 @@ public extension VoiceActivityDetector {
         return _detectVAD(buffer, windowSampleNums, modelHandler)
     }
     
+    /// Detects voice activity in continuous streaming mode
+    /// - Parameters:
+    ///   - buffer: The audio buffer to analyze
+    ///   - windowSampleNums: Number of samples per analysis window (default: 512)
+    /// - Returns: Array of VAD results or nil if detection fails
     func detectContinuously(buffer: AVAudioPCMBuffer, windowSampleNums: Int = 512) -> [VADResult]? {
         guard let modelHandler = _modelHandler else {
             return nil
@@ -170,31 +202,18 @@ public extension VoiceActivityDetector {
     }
     
     /**
-     Parameters
-     ----------
-     threshold: float (default - 0.5)
-     Speech threshold. Silero VAD outputs speech probabilities for each audio chunk, probabilities ABOVE this value are considered as SPEECH.
-     It is better to tune this parameter for each dataset separately, but "lazy" 0.5 is pretty good for most datasets.
-     Voice thresholds.Silero VAD Output a speech probability for each audio block, with probabilities above this value considered speech.
-     It's best to adjust this parameter for each dataset, but for most datasets, 0.5 is a good choice.
+     Detects voice activity with advanced timing parameters
      
-     minSpeechDurationInMS: int (default - 250 milliseconds)
-     Final speech chunks shorter minSpeechDurationInMS are thrown out
-     If the duration of the segmented voice block is less than the minimum voice duration, it is discarded.
+     - Parameters:
+        - buffer: Audio buffer to analyze
+        - threshold: Speech probability threshold (0-1, default 0.5)
+        - minSpeechDurationInMS: Minimum speech duration in milliseconds (default 250)
+        - maxSpeechDurationInS: Maximum speech duration in seconds (default 30)
+        - minSilenceDurationInMS: Minimum silence duration in milliseconds (default 100)
+        - speechPadInMS: Padding duration in milliseconds (default 30)
+        - windowSampleNums: Number of samples per analysis window (default 512)
      
-     maxSpeechDurationInS: int (default -  inf)
-     Maximum duration of speech chunks in seconds
-     Chunks longer than maxSpeechDurationInS will be split at the timestamp of the last silence that lasts more than 100s (if any), to prevent agressive cutting.
-     Otherwise, they will be split aggressively just before maxSpeechDurationInS.
-     The maximum duration of the voice block, the block beyond this time will be split at the last silent timestamp that exceeds 100 seconds to prevent too vigorous cutting. Otherwise, they will be aggressively split before the maximum voice duration.
-     
-     minSilenceDurationInMS: int (default - 100 milliseconds)
-     In the end of each speech chunk wait for minSilenceDurationInMS before separating it
-     At the end of each speech block, wait for the minimum silence time for splitting.
-     
-     speechPadInMS: int (default - 30 milliseconds)
-     Final speech chunks are padded by speechPadInMS each side
-     The final speech block is populated with the voice fill time on each side.
+     - Returns: Array of voice activity time segments or nil if detection fails
      */
     func detectForTimeStemp(buffer: AVAudioPCMBuffer,
                             threshold: Float = 0.5,

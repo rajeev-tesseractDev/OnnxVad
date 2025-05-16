@@ -15,42 +15,66 @@ import Foundation
 import UIKit
 import onnxruntime_objc
 
-// Result struct
+/// Represents the result of a model prediction
 struct Result {
+    /// The processing time in milliseconds
     let processTimeMs: Double
+    /// The output score from the model
     let score: Float
+    /// The hidden state output from the LSTM layer
     let hn: ORTValue
+    /// The cell state output from the LSTM layer
     let cn: ORTValue
 }
 
+/// Errors that can occur during model operations
 enum OrtModelError: Error {
     case error(_ message: String)
 }
 
+/// A class for handling ONNX model operations including loading, running predictions, and managing LSTM states
 final class ModelHandler: NSObject {
     // MARK: - Inference Properties
+    
+    /// The number of threads to use for inference
     let threadCount: Int32
+    /// The maximum allowed number of threads
     let threadCountLimit = 10
     
     // MARK: - Model Parameters
+    
+    /// The batch size for model input
     let batchSize = 1
+    /// The number of input channels
     let inputChannels = 3
+    /// The width of the input tensor
     let inputWidth = 300
+    /// The height of the input tensor
     let inputHeight = 300
     
+    /// The dimension of each LSTM unit
     let lstm_unit_dimension = 64
+    /// The number of LSTM units
     let lstm_unit_num = 2
     
+    /// The last sample rate used
     var _last_sr: Int = 0
+    /// The last batch size used
     var _last_batch_size: Int = 0
     
-    //The status of the LSTM layer
-    var _h: ORTValue!;
-    var _c: ORTValue!;
+    /// The current hidden state of the LSTM layer
+    var _h: ORTValue!
+    /// The current cell state of the LSTM layer
+    var _c: ORTValue!
     
     private var session: ORTSession
     private var env: ORTEnv
     
+    /// Initializes the model handler with the specified model file
+    /// - Parameters:
+    ///   - modelFilename: The name of the model file
+    ///   - modelExtension: The file extension of the model
+    ///   - threadCount: The number of threads to use for inference (default: 1)
     init?(modelFilename: String, modelExtension: String, threadCount: Int32 = 1) {
         guard let modelPath = Bundle.main.url(forResource: modelFilename, withExtension: modelExtension)?.path() else {
             print("Failed to get model file path with name.")
@@ -72,6 +96,10 @@ final class ModelHandler: NSObject {
         super.init()
     }
     
+    /// Checks if the parameters have changed and resets state if necessary
+    /// - Parameters:
+    ///   - batchSize: The current batch size
+    ///   - sr: The current sample rate
     func parameterCheck(batchSize: Int, sr: Int) {
         guard _last_batch_size == batchSize,
               _last_sr == sr else {
@@ -80,6 +108,10 @@ final class ModelHandler: NSObject {
         }
     }
     
+    /// Parses an ORTValue to extract a Float value
+    /// - Parameter value: The ORTValue to parse
+    /// - Returns: The extracted Float value
+    /// - Throws: OrtModelError if the value cannot be parsed
     func _parseToFloat(value: ORTValue?) throws -> Float {
         guard let rawOutputValue = value else {
             throw OrtModelError.error("failed to get model output")
@@ -89,6 +121,10 @@ final class ModelHandler: NSObject {
         return floatValue
     }
     
+    /// Runs a prediction with the given input tensors
+    /// - Parameter inputTensors: An array of input tensors
+    /// - Returns: A Result struct containing the prediction results
+    /// - Throws: OrtModelError if the prediction fails
     func _prediction(inputTensors: [ORTValue]) throws -> Result {
         let inputNames = ["input", "sr", "h", "c"]
         let outputNames: Set<String> = ["output", "hn", "cn"]
@@ -120,8 +156,12 @@ final class ModelHandler: NSObject {
 }
 
 extension ModelHandler {
-    //sr: 8k or 16k
-    func prediction(x: Data, sr: Int64) -> Float{
+    /// Runs a prediction with the given input data and sample rate
+    /// - Parameters:
+    ///   - x: The input data as a Data object
+    ///   - sr: The sample rate (8k or 16k)
+    /// - Returns: The prediction score as a Float
+    func prediction(x: Data, sr: Int64) -> Float {
         do {
             let size = x.count / MemoryLayout<Float>.size
             let inputShape: [NSNumber] = [batchSize as NSNumber,
@@ -147,7 +187,9 @@ extension ModelHandler {
         return 0
     }
     
-    func resetState(batchSize: Int = 1){
+    /// Resets the LSTM states to zero
+    /// - Parameter batchSize: The batch size to use for the reset states (default: 1)
+    func resetState(batchSize: Int = 1) {
         _last_sr = 0
         _last_batch_size = 0
         let inputShape: [NSNumber] = [lstm_unit_num as NSNumber,
